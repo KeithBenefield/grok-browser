@@ -1,7 +1,7 @@
 # Creates/updates a Start Menu shortcut that matches the app's AppUserModelID
 # so Windows can offer "Pin to taskbar".
 #
-# Usage (from repo root, after cargo build --release + copy to LocalAppData):
+# Usage:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\install-start-shortcut.ps1
 
 $ErrorActionPreference = "Stop"
@@ -56,16 +56,23 @@ public class AppIdShortcut {
   }
 
   [StructLayout(LayoutKind.Sequential, Pack = 4)]
-  struct PropertyKey { public Guid fmtid; public uint pid; }
+  struct PropertyKey {
+    public Guid fmtid;
+    public uint pid;
+  }
 
   [StructLayout(LayoutKind.Sequential)]
   struct PropVariant {
     public ushort vt;
-    public ushort wReserved1, wReserved2, wReserved3;
+    public ushort wReserved1;
+    public ushort wReserved2;
+    public ushort wReserved3;
     public IntPtr pointerValue;
   }
 
-  [DllImport("ole32.dll")] static extern int PropVariantClear(ref PropVariant pvar);
+  [DllImport("ole32.dll")]
+  static extern int PropVariantClear(ref PropVariant pvar);
+
   [DllImport("propsys.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
   static extern void InitPropVariantFromString([MarshalAs(UnmanagedType.LPWStr)] string psz, out PropVariant ppropvar);
 
@@ -82,31 +89,39 @@ public class AppIdShortcut {
     void GetCurFile([In, MarshalAs(UnmanagedType.LPWStr)] string ppszFileName);
   }
 
+  static void SetProp(IPropertyStore store, Guid fmt, uint pid, string value) {
+    PropertyKey pk = new PropertyKey();
+    pk.fmtid = fmt;
+    pk.pid = pid;
+    PropVariant pv;
+    InitPropVariantFromString(value, out pv);
+    store.SetValue(ref pk, ref pv);
+    PropVariantClear(ref pv);
+  }
+
   public static void Create(string lnkPath, string target, string workDir, string aumid) {
-    var link = (IShellLinkW)new ShellLink();
+    IShellLinkW link = (IShellLinkW)new ShellLink();
     link.SetPath(target);
     link.SetWorkingDirectory(workDir);
     link.SetIconLocation(target, 0);
-    link.SetDescription("Grok (desktop shell)");
-    var store = (IPropertyStore)link;
-    var fmt = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
-    void Set(uint pid, string value) {
-      var pk = new PropertyKey { fmtid = fmt, pid = pid };
-      InitPropVariantFromString(value, out var pv);
-      store.SetValue(ref pk, ref pv);
-      PropVariantClear(ref pv);
-    }
-    Set(5, aumid); // AppUserModel.ID
-    Set(2, target.Contains(" ") ? "\"" + target + "\"" : target); // RelaunchCommand
-    Set(3, target + ",0"); // RelaunchIconResource
-    Set(4, "Grok"); // RelaunchDisplayNameResource
+    link.SetDescription("Grok desktop shell");
+
+    IPropertyStore store = (IPropertyStore)link;
+    Guid fmt = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+    string cmd = target.Contains(" ") ? ("\"" + target + "\"") : target;
+    SetProp(store, fmt, 5, aumid);
+    SetProp(store, fmt, 2, cmd);
+    SetProp(store, fmt, 3, target + ",0");
+    SetProp(store, fmt, 4, "Grok");
     store.Commit();
-    ((IPersistFile)link).Save(lnkPath, true);
+
+    IPersistFile file = (IPersistFile)link;
+    file.Save(lnkPath, true);
   }
 }
 '@
 
-Add-Type -TypeDefinition $cs
+Add-Type -TypeDefinition $cs -ErrorAction Stop
 [AppIdShortcut]::Create($Lnk, $Exe, (Split-Path $Exe -Parent), $Aumid)
 
 Write-Host "Created: $Lnk"
@@ -116,5 +131,5 @@ Write-Host ""
 Write-Host "How to pin to taskbar (Windows 11):"
 Write-Host "  1. Close any running Grok window."
 Write-Host "  2. Open Start and search for: Grok Desktop"
-Write-Host "  3. Right-click -> Pin to taskbar"
-Write-Host "  (Avoid the Brave Apps Grok entry - that is the browser PWA.)"
+Write-Host "  3. Right-click that result -> Pin to taskbar"
+Write-Host "  Do not use Brave Apps Grok (that is the browser PWA)."
