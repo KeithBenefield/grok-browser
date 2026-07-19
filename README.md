@@ -21,6 +21,8 @@ cargo build --release
 .\target\release\grok-browser.exe
 ```
 
+The app icon lives at `assets/icon.ico` and is embedded into the Windows `.exe` at build time (Explorer, taskbar, window title bar).
+
 ## Data directory
 
 Browser profile data (cookies, cache, service workers) is stored under:

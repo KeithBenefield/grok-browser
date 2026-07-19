@@ -4,9 +4,12 @@ use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
-    window::WindowBuilder,
+    window::{Icon, WindowBuilder},
 };
 use wry::{NewWindowResponse, WebContext, WebViewBuilder};
+
+#[cfg(target_os = "windows")]
+use tao::platform::windows::IconExtWindows;
 
 const START_URL: &str = "https://grok.com";
 const APP_NAME: &str = "Grok Browser";
@@ -86,14 +89,53 @@ fn set_window_title(window: &tao::window::Window, title: &str) {
     }
 }
 
+/// Window / taskbar icon: prefer the icon embedded in the .exe (works when you
+/// only ship the binary), then fall back to assets/icon.ico on disk.
+fn load_window_icon() -> Option<Icon> {
+    #[cfg(target_os = "windows")]
+    {
+        // winres embeds the app icon as resource id 1.
+        if let Ok(icon) = Icon::from_resource(1, None) {
+            return Some(icon);
+        }
+
+        let candidates = [
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icon.ico"),
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("assets/icon.ico")))
+                .unwrap_or_default(),
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("icon.ico")))
+                .unwrap_or_default(),
+        ];
+        for path in candidates {
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            if let Ok(icon) = Icon::from_path(&path, None) {
+                return Some(icon);
+            }
+        }
+    }
+    None
+}
+
 pub fn setup_webview() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    let window = WindowBuilder::new()
+    let mut window_builder = WindowBuilder::new()
         .with_title(APP_NAME)
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
-        .with_min_inner_size(LogicalSize::new(640.0, 480.0))
+        .with_min_inner_size(LogicalSize::new(640.0, 480.0));
+
+    if let Some(icon) = load_window_icon() {
+        window_builder = window_builder.with_window_icon(Some(icon));
+    }
+
+    let window = window_builder
         .build(&event_loop)
         .expect("Failed to create window");
 
@@ -104,7 +146,7 @@ pub fn setup_webview() {
     let title_proxy = proxy.clone();
     let nav_proxy = proxy.clone();
 
-    let mut builder = WebViewBuilder::new_with_web_context(&mut web_context)
+    let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url(START_URL)
         .with_clipboard(true)
         .with_hotkeys_zoom(true)
@@ -143,13 +185,9 @@ pub fn setup_webview() {
         .with_new_window_req_handler(move |url, _features| {
             let _ = nav_proxy.send_event(UserEvent::Navigate(url));
             NewWindowResponse::Deny
-        });
-
-    // DevTools available in debug builds (right-click Inspect / F12 with accelerator keys).
-    #[cfg(debug_assertions)]
-    {
-        builder = builder.with_devtools(true);
-    }
+        })
+        // DevTools in debug builds (right-click Inspect / F12 with accelerator keys).
+        .with_devtools(cfg!(debug_assertions));
 
     let webview = builder.build(&window).expect("Failed to build WebView");
 
