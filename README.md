@@ -23,6 +23,33 @@ cargo build --release
 
 The app icon lives at `assets/icon.ico` and is embedded into the Windows `.exe` at build time (Explorer, taskbar, window title bar).
 
+## Install for daily use (recommended)
+
+`target\release\` is temporary build output (deleted by `cargo clean`). For a stable path and taskbar pin, copy the release binary into Local AppData:
+
+```powershell
+cargo build --release
+New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\GrokBrowser\bin" | Out-Null
+Copy-Item target\release\grok-browser.exe "$env:LOCALAPPDATA\GrokBrowser\bin\Grok.exe" -Force
+```
+
+Optional: create/update the Start Menu shortcut used for **Pin to taskbar** (AppUserModelID-matched):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-start-shortcut.ps1
+```
+
+Then pin **Grok Desktop** from the Start menu (not the Brave Apps “Grok” PWA entry).
+
+### After you change the code
+
+Rebuild and overwrite the installed copy (your taskbar pin can stay):
+
+```powershell
+cargo build --release
+Copy-Item target\release\grok-browser.exe "$env:LOCALAPPDATA\GrokBrowser\bin\Grok.exe" -Force
+```
+
 ## Data directory
 
 Browser profile data (cookies, cache, service workers) is stored under:
