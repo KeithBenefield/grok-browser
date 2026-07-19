@@ -6,7 +6,7 @@ A minimal Windows desktop shell for [grok.com](https://grok.com), built with [wr
 
 - Windows 10/11
 - [Rust](https://rustup.rs/) (stable)
-- WebView2 Runtime (usually preinstalled on modern Windows)
+- [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (usually preinstalled on modern Windows)
 
 ## Build & run
 
@@ -14,18 +14,51 @@ A minimal Windows desktop shell for [grok.com](https://grok.com), built with [wr
 cargo run
 ```
 
-Release build:
+Release build (no console window):
 
 ```powershell
 cargo build --release
 .\target\release\grok-browser.exe
 ```
 
-## Notes
+## Data directory
 
-- WebView2 stores its user data next to the executable by default (e.g. `target\debug\grok-browser.exe.WebView2`). That folder can grow large with cache and service workers; it is gitignored via `/target/`.
-- The current build may inject a demo init script on page load; treat that as experimental.
+Browser profile data (cookies, cache, service workers) is stored under:
+
+```text
+%LOCALAPPDATA%\GrokBrowser\WebView2
+```
+
+This is **outside** the Cargo `target/` tree so debug builds do not accumulate an unbounded WebView2 profile next to the executable.
+
+To wipe login/session/cache and start fresh:
+
+```powershell
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\GrokBrowser"
+```
+
+### Legacy profile cleanup
+
+Older builds wrote the profile next to the debug binary. You can reclaim space with:
+
+```powershell
+Remove-Item -Recurse -Force ".\target\debug\grok-browser.exe.WebView2" -ErrorAction SilentlyContinue
+# Or fully clean build artifacts:
+cargo clean
+```
+
+You will need to sign in again after moving to the new data directory (profiles are not migrated automatically).
+
+## Features
+
+- Loads https://grok.com in a native window
+- Persistent profile under LocalAppData
+- Page title synced to the window title
+- Clipboard and zoom hotkeys enabled
+- Downloads default to your Downloads folder
+- New-window popups blocked (navigation stays in the same window)
+- DevTools enabled only in debug builds
 
 ## License
 
-MIT (or as otherwise noted if a `LICENSE` file is added).
+MIT — see [LICENSE](LICENSE).
