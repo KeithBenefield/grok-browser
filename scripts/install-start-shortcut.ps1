@@ -1,0 +1,120 @@
+# Creates/updates a Start Menu shortcut that matches the app's AppUserModelID
+# so Windows can offer "Pin to taskbar".
+#
+# Usage (from repo root, after cargo build --release + copy to LocalAppData):
+#   powershell -ExecutionPolicy Bypass -File .\scripts\install-start-shortcut.ps1
+
+$ErrorActionPreference = "Stop"
+$Aumid = "KeithBenefield.GrokBrowser"
+$Exe = Join-Path $env:LOCALAPPDATA "GrokBrowser\bin\Grok.exe"
+$StartDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+$Lnk = Join-Path $StartDir "Grok Desktop.lnk"
+
+if (-not (Test-Path $Exe)) {
+    Write-Host "Missing $Exe"
+    Write-Host "Build and copy first:"
+    Write-Host '  cargo build --release'
+    Write-Host '  Copy-Item target\release\grok-browser.exe "$env:LOCALAPPDATA\GrokBrowser\bin\Grok.exe" -Force'
+    exit 1
+}
+
+$cs = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class AppIdShortcut {
+  [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IShellLinkW {
+    void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cch, IntPtr pfd, int fFlags);
+    void GetIDList(out IntPtr ppidl);
+    void SetIDList(IntPtr pidl);
+    void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cch);
+    void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+    void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cch);
+    void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+    void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cch);
+    void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+    void GetHotkey(out short pwHotkey);
+    void SetHotkey(short wHotkey);
+    void GetShowCmd(out int piShowCmd);
+    void SetShowCmd(int iShowCmd);
+    void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath, int cch, out int piIcon);
+    void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+    void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, int dwReserved);
+    void Resolve(IntPtr hwnd, int fFlags);
+    void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+  }
+
+  [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPropertyStore {
+    void GetCount(out uint cProps);
+    void GetAt(uint iProp, out PropertyKey pkey);
+    void GetValue(ref PropertyKey key, out PropVariant pv);
+    void SetValue(ref PropertyKey key, ref PropVariant pv);
+    void Commit();
+  }
+
+  [StructLayout(LayoutKind.Sequential, Pack = 4)]
+  struct PropertyKey { public Guid fmtid; public uint pid; }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct PropVariant {
+    public ushort vt;
+    public ushort wReserved1, wReserved2, wReserved3;
+    public IntPtr pointerValue;
+  }
+
+  [DllImport("ole32.dll")] static extern int PropVariantClear(ref PropVariant pvar);
+  [DllImport("propsys.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+  static extern void InitPropVariantFromString([MarshalAs(UnmanagedType.LPWStr)] string psz, out PropVariant ppropvar);
+
+  [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+  class ShellLink { }
+
+  [ComImport, Guid("0000010b-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IPersistFile {
+    void GetClassID(out Guid pClassID);
+    [PreserveSig] int IsDirty();
+    void Load([In, MarshalAs(UnmanagedType.LPWStr)] string pszFileName, uint dwMode);
+    void Save([In, MarshalAs(UnmanagedType.LPWStr)] string pszFileName, [In, MarshalAs(UnmanagedType.Bool)] bool fRemember);
+    void SaveCompleted([In, MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
+    void GetCurFile([In, MarshalAs(UnmanagedType.LPWStr)] string ppszFileName);
+  }
+
+  public static void Create(string lnkPath, string target, string workDir, string aumid) {
+    var link = (IShellLinkW)new ShellLink();
+    link.SetPath(target);
+    link.SetWorkingDirectory(workDir);
+    link.SetIconLocation(target, 0);
+    link.SetDescription("Grok (desktop shell)");
+    var store = (IPropertyStore)link;
+    var fmt = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+    void Set(uint pid, string value) {
+      var pk = new PropertyKey { fmtid = fmt, pid = pid };
+      InitPropVariantFromString(value, out var pv);
+      store.SetValue(ref pk, ref pv);
+      PropVariantClear(ref pv);
+    }
+    Set(5, aumid); // AppUserModel.ID
+    Set(2, target.Contains(" ") ? "\"" + target + "\"" : target); // RelaunchCommand
+    Set(3, target + ",0"); // RelaunchIconResource
+    Set(4, "Grok"); // RelaunchDisplayNameResource
+    store.Commit();
+    ((IPersistFile)link).Save(lnkPath, true);
+  }
+}
+'@
+
+Add-Type -TypeDefinition $cs
+[AppIdShortcut]::Create($Lnk, $Exe, (Split-Path $Exe -Parent), $Aumid)
+
+Write-Host "Created: $Lnk"
+Write-Host "Target:  $Exe"
+Write-Host "AUMID:   $Aumid"
+Write-Host ""
+Write-Host "How to pin to taskbar (Windows 11):"
+Write-Host "  1. Close any running Grok window."
+Write-Host "  2. Open Start and search for: Grok Desktop"
+Write-Host "  3. Right-click -> Pin to taskbar"
+Write-Host "  (Avoid the Brave Apps 'Grok' entry — that is the browser PWA.)"

@@ -140,6 +140,16 @@ pub fn setup_webview() {
         .build(&event_loop)
         .expect("Failed to create window");
 
+    // Taskbar pin: AUMID + relaunch props on the HWND (process-level alone is often not enough).
+    #[cfg(target_os = "windows")]
+    {
+        use tao::platform::windows::WindowExtWindows;
+        crate::windows_app::set_window_relaunch_props(
+            window.hwnd(),
+            &crate::windows_app::current_exe_path(),
+        );
+    }
+
     let data_dir = user_data_dir();
     // Keep WebContext alive for the life of the WebView.
     let mut web_context = WebContext::new(Some(data_dir.clone()));
