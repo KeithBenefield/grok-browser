@@ -61,6 +61,7 @@ public class AppIdShortcut {
     public uint pid;
   }
 
+  // x64 PROPVARIANT (24 bytes)
   [StructLayout(LayoutKind.Sequential)]
   struct PropVariant {
     public ushort vt;
@@ -68,13 +69,11 @@ public class AppIdShortcut {
     public ushort wReserved2;
     public ushort wReserved3;
     public IntPtr pointerValue;
+    public IntPtr pad;
   }
 
   [DllImport("ole32.dll")]
   static extern int PropVariantClear(ref PropVariant pvar);
-
-  [DllImport("propsys.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
-  static extern void InitPropVariantFromString([MarshalAs(UnmanagedType.LPWStr)] string psz, out PropVariant ppropvar);
 
   [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
   class ShellLink { }
@@ -89,12 +88,20 @@ public class AppIdShortcut {
     void GetCurFile([In, MarshalAs(UnmanagedType.LPWStr)] string ppszFileName);
   }
 
+  const ushort VT_LPWSTR = 31;
+
+  static PropVariant FromString(string s) {
+    PropVariant pv = new PropVariant();
+    pv.vt = VT_LPWSTR;
+    pv.pointerValue = Marshal.StringToCoTaskMemUni(s);
+    return pv;
+  }
+
   static void SetProp(IPropertyStore store, Guid fmt, uint pid, string value) {
     PropertyKey pk = new PropertyKey();
     pk.fmtid = fmt;
     pk.pid = pid;
-    PropVariant pv;
-    InitPropVariantFromString(value, out pv);
+    PropVariant pv = FromString(value);
     store.SetValue(ref pk, ref pv);
     PropVariantClear(ref pv);
   }
@@ -121,10 +128,23 @@ public class AppIdShortcut {
 }
 '@
 
-Add-Type -TypeDefinition $cs -ErrorAction Stop
-[AppIdShortcut]::Create($Lnk, $Exe, (Split-Path $Exe -Parent), $Aumid)
+try {
+    Add-Type -TypeDefinition $cs -ErrorAction Stop
+    [AppIdShortcut]::Create($Lnk, $Exe, (Split-Path $Exe -Parent), $Aumid)
+    Write-Host "Created (with AppUserModelID): $Lnk"
+} catch {
+    Write-Host "COM property store path failed: $_"
+    Write-Host "Falling back to basic shortcut..."
+    $wsh = New-Object -ComObject WScript.Shell
+    $sc = $wsh.CreateShortcut($Lnk)
+    $sc.TargetPath = $Exe
+    $sc.WorkingDirectory = (Split-Path $Exe -Parent)
+    $sc.Description = "Grok desktop shell"
+    $sc.IconLocation = "$Exe,0"
+    $sc.Save()
+    Write-Host "Created (basic): $Lnk"
+}
 
-Write-Host "Created: $Lnk"
 Write-Host "Target:  $Exe"
 Write-Host "AUMID:   $Aumid"
 Write-Host ""
@@ -132,4 +152,5 @@ Write-Host "How to pin to taskbar (Windows 11):"
 Write-Host "  1. Close any running Grok window."
 Write-Host "  2. Open Start and search for: Grok Desktop"
 Write-Host "  3. Right-click that result -> Pin to taskbar"
+Write-Host "     (If you only see Pin to Start, try: open the app, then right-click its taskbar icon.)"
 Write-Host "  Do not use Brave Apps Grok (that is the browser PWA)."
