@@ -12,7 +12,7 @@ use wry::{NewWindowResponse, WebContext, WebViewBuilder};
 use tao::platform::windows::IconExtWindows;
 
 const START_URL: &str = "https://grok.com";
-const APP_NAME: &str = "Grok Browser";
+const APP_NAME: &str = "Grok";
 
 /// Host-injected (not page-eval) helpers:
 /// - Ensure form controls have a `name` so Chromium's autofill audit is quieter
@@ -82,10 +82,11 @@ fn downloads_dir() -> PathBuf {
 }
 
 fn set_window_title(window: &tao::window::Window, title: &str) {
+    // Use the page title as-is; fall back to "Grok" (no "App — Grok" double branding).
     if title.is_empty() {
         window.set_title(APP_NAME);
     } else {
-        window.set_title(&format!("{title} — {APP_NAME}"));
+        window.set_title(title);
     }
 }
 

@@ -6,8 +6,8 @@ fn main() {
     {
         let mut res = winres::WindowsResource::new();
         res.set_icon("assets/icon.ico");
-        res.set("ProductName", "Grok Browser");
-        res.set("FileDescription", "Grok Browser");
+        res.set("ProductName", "Grok");
+        res.set("FileDescription", "Grok");
         // Shown in Explorer / Task Manager for the .exe
         if let Err(err) = res.compile() {
             // Don't hard-fail on exotic hosts; window icon can still load from file.
