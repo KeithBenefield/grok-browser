@@ -1,0 +1,13 @@
+{
+    "version": "2.0.0",
+    "configurations": [
+      {
+        "type": "lldb",
+        "request": "launch",
+        "name": "Debug",
+        "cargo": { "args": ["run"] },
+        "cwd": "${workspaceFolder}",
+        "program": "${workspaceFolder}/target/debug/grok-browser.exe"
+      }
+    ]
+  }

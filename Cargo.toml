@@ -1,0 +1,8 @@
+[package]
+name = "grok-browser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wry = "0.24"
+tao = "0.16"
