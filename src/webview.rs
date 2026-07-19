@@ -1,20 +1,63 @@
 use std::path::PathBuf;
 
-use wry::{
-    application::{
-        dpi::LogicalSize,
-        event::{Event, WindowEvent},
-        event_loop::{ControlFlow, EventLoop},
-        window::WindowBuilder,
-    },
-    webview::{WebContext, WebViewBuilder},
+use tao::{
+    dpi::LogicalSize,
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoopBuilder},
+    window::WindowBuilder,
 };
+use wry::{NewWindowResponse, WebContext, WebViewBuilder};
 
 const START_URL: &str = "https://grok.com";
 const APP_NAME: &str = "Grok Browser";
 
-/// WebView2 / browser profile directory outside the build tree so
-/// `target/debug` does not accumulate unbounded cache growth.
+/// Host-injected (not page-eval) helpers:
+/// - Ensure form controls have a `name` so Chromium's autofill audit is quieter
+/// - Never uses eval / string timers (avoids CSP `unsafe-eval` issues from *our* code)
+const PAGE_HELPERS_JS: &str = r#"
+(function () {
+  if (window.__grokBrowserHelpers) return;
+  window.__grokBrowserHelpers = true;
+
+  function ensureFieldNames(root) {
+    try {
+      var nodes = (root || document).querySelectorAll(
+        "input:not([name]):not([id]), select:not([name]):not([id]), textarea:not([name]):not([id])"
+      );
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (!el.getAttribute("name") && !el.id) {
+          el.setAttribute("name", "gb-field-" + (el.type || el.tagName.toLowerCase()) + "-" + i);
+        }
+      }
+    } catch (_) {}
+  }
+
+  function run() {
+    ensureFieldNames(document);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", run, { once: true });
+  } else {
+    run();
+  }
+
+  try {
+    new MutationObserver(function () {
+      run();
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  } catch (_) {}
+})();
+"#;
+
+enum UserEvent {
+    TitleChanged(String),
+    /// `window.open` / target=_blank → load in this window instead of a popup.
+    Navigate(String),
+}
+
+/// WebView2 profile outside the build tree so `target/` does not accumulate cache.
 fn user_data_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -35,8 +78,18 @@ fn downloads_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+fn set_window_title(window: &tao::window::Window, title: &str) {
+    if title.is_empty() {
+        window.set_title(APP_NAME);
+    } else {
+        window.set_title(&format!("{title} — {APP_NAME}"));
+    }
+}
+
 pub fn setup_webview() {
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
@@ -48,26 +101,31 @@ pub fn setup_webview() {
     // Keep WebContext alive for the life of the WebView.
     let mut web_context = WebContext::new(Some(data_dir.clone()));
 
-    let mut builder = WebViewBuilder::new(window)
-        .expect("Failed to create WebViewBuilder")
-        .with_web_context(&mut web_context)
+    let title_proxy = proxy.clone();
+    let nav_proxy = proxy.clone();
+
+    let mut builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url(START_URL)
-        .expect("Failed to set URL")
         .with_clipboard(true)
         .with_hotkeys_zoom(true)
-        .with_document_title_changed_handler(|window, title| {
-            if title.is_empty() {
-                window.set_title(APP_NAME);
-            } else {
-                window.set_title(&format!("{title} — {APP_NAME}"));
-            }
+        .with_focused(true)
+        .with_general_autofill_enabled(true)
+        .with_initialization_script(PAGE_HELPERS_JS)
+        .with_document_title_changed_handler(move |title| {
+            let _ = title_proxy.send_event(UserEvent::TitleChanged(title));
         })
         .with_download_started_handler(move |url, path| {
-            // Suggest a filename under the user's Downloads folder.
             let name = url
                 .rsplit('/')
                 .next()
-                .filter(|s| !s.is_empty() && s.contains('.'))
+                .and_then(|s| {
+                    let clean = s.split('?').next().unwrap_or(s);
+                    if !clean.is_empty() && clean.contains('.') {
+                        Some(clean)
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("download");
             *path = downloads_dir().join(name);
             true
@@ -81,24 +139,24 @@ pub fn setup_webview() {
                 eprintln!("download failed");
             }
         })
-        // Allow in-page navigations; block popups that open a second window
-        // (user can still navigate via links in the same webview).
-        .with_new_window_req_handler(|url| {
-            eprintln!("blocked new-window request (open in-tab): {url}");
-            false
+        // No second window: open links / window.open in this shell.
+        .with_new_window_req_handler(move |url, _features| {
+            let _ = nav_proxy.send_event(UserEvent::Navigate(url));
+            NewWindowResponse::Deny
         });
 
-    // DevTools only in debug builds (right-click → Inspect, or open programmatically).
+    // DevTools available in debug builds (right-click Inspect / F12 with accelerator keys).
     #[cfg(debug_assertions)]
     {
         builder = builder.with_devtools(true);
     }
 
-    let webview = builder.build().expect("Failed to build WebView");
+    let webview = builder.build(&window).expect("Failed to build WebView");
 
     eprintln!(
-        "{APP_NAME} started — profile: {} — {START_URL}",
-        data_dir.display()
+        "{APP_NAME} started — profile: {} — wry {} — {START_URL}",
+        data_dir.display(),
+        env!("CARGO_PKG_VERSION"),
     );
 
     event_loop.run(move |event, _, control_flow| {
@@ -106,12 +164,22 @@ pub fn setup_webview() {
         // Keep webview + context alive for the event loop lifetime.
         let _ = (&webview, &web_context);
 
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            *control_flow = ControlFlow::Exit;
+        match event {
+            Event::UserEvent(UserEvent::TitleChanged(title)) => {
+                set_window_title(&window, &title);
+            }
+            Event::UserEvent(UserEvent::Navigate(url)) => {
+                if let Err(err) = webview.load_url(&url) {
+                    eprintln!("navigation failed ({url}): {err}");
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                *control_flow = ControlFlow::Exit;
+            }
+            _ => {}
         }
     });
 }

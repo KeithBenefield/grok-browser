@@ -1,6 +1,6 @@
 [package]
 name = "grok-browser"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Minimal Windows desktop shell for grok.com (WebView2 / wry)"
 repository = "https://github.com/KeithBenefield/grok-browser"
@@ -10,7 +10,8 @@ keywords = ["grok", "webview", "browser", "wry"]
 categories = ["gui"]
 
 [dependencies]
-wry = "0.24"
+tao = "0.35"
+wry = "0.55"
 
 [profile.release]
 lto = true

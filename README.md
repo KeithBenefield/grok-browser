@@ -1,6 +1,6 @@
 # Grok Browser
 
-A minimal Windows desktop shell for [grok.com](https://grok.com), built with [wry](https://github.com/tauri-apps/wry) (WebView2).
+A minimal Windows desktop shell for [grok.com](https://grok.com), built with [wry](https://github.com/tauri-apps/wry) 0.55 + [tao](https://github.com/tauri-apps/tao) (WebView2).
 
 ## Requirements
 
@@ -39,25 +39,35 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\GrokBrowser"
 
 ### Legacy profile cleanup
 
-Older builds wrote the profile next to the debug binary. You can reclaim space with:
+Older builds wrote the profile next to the debug binary. Reclaim space with:
 
 ```powershell
 Remove-Item -Recurse -Force ".\target\debug\grok-browser.exe.WebView2" -ErrorAction SilentlyContinue
-# Or fully clean build artifacts:
 cargo clean
 ```
 
-You will need to sign in again after moving to the new data directory (profiles are not migrated automatically).
-
 ## Features
 
-- Loads https://grok.com in a native window
+- Loads https://grok.com in a native window (no address bar)
 - Persistent profile under LocalAppData
 - Page title synced to the window title
 - Clipboard and zoom hotkeys enabled
 - Downloads default to your Downloads folder
-- New-window popups blocked (navigation stays in the same window)
-- DevTools enabled only in debug builds
+- `window.open` / target=_blank open in the same window
+- Host init script adds `name` on anonymous form fields (quieter autofill audits)
+- DevTools enabled in debug builds
+
+## DevTools Issues panel notes
+
+Some items under **Issues** are from **grok.com’s own page**, not this shell:
+
+| Issue | Source | Can the shell fix it? |
+|-------|--------|------------------------|
+| CSP blocks `eval` | Grok’s Content-Security-Policy | No (by design; weakening CSP would be worse) |
+| Form field missing id/name | Grok HTML | Partially (we inject `name` on empty fields) |
+| History item marked skippable | SPA `pushState` without a user gesture | No (Chromium policy for SPAs) |
+
+If chat works after login, treat remaining CSP/history Issues as site noise.
 
 ## License
 
