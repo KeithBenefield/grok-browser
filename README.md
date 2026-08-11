@@ -78,6 +78,7 @@ cargo clean
 ## Features
 
 - Loads https://grok.com in a native window (no address bar)
+- Window title shows package version (e.g. `Grok · v0.3.3`)
 - Persistent profile under LocalAppData
 - Page title synced to the window title
 - Clipboard and zoom hotkeys enabled

@@ -13,6 +13,7 @@ use tao::platform::windows::IconExtWindows;
 
 const START_URL: &str = "https://grok.com";
 const APP_NAME: &str = "Grok";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Host-injected (not page-eval) helpers:
 /// - Ensure form controls have a `name` so Chromium's autofill audit is quieter
@@ -226,13 +227,19 @@ fn resolve_download_path(url: &str, suggested: &std::path::Path) -> PathBuf {
     unique_path(&dir, &name)
 }
 
-fn set_window_title(window: &tao::window::Window, title: &str) {
-    // Use the page title as-is; fall back to "Grok" (no "App — Grok" double branding).
-    if title.is_empty() {
-        window.set_title(APP_NAME);
+fn default_window_title() -> String {
+    format!("{APP_NAME} · v{APP_VERSION}")
+}
+
+fn set_window_title(window: &tao::window::Window, page_title: &str) {
+    // Always include the package version so we can tell which build is running.
+    // Page title from grok.com is used when present; avoid "Grok · Grok · v…".
+    let title = if page_title.is_empty() || page_title.eq_ignore_ascii_case(APP_NAME) {
+        default_window_title()
     } else {
-        window.set_title(title);
-    }
+        format!("{page_title} · v{APP_VERSION}")
+    };
+    window.set_title(&title);
 }
 
 /// Window / taskbar icon: prefer the icon embedded in the .exe (works when you
@@ -273,7 +280,7 @@ pub fn setup_webview() {
     let proxy = event_loop.create_proxy();
 
     let mut window_builder = WindowBuilder::new()
-        .with_title(APP_NAME)
+        .with_title(default_window_title())
         .with_inner_size(LogicalSize::new(1280.0, 800.0))
         .with_min_inner_size(LogicalSize::new(640.0, 480.0));
 
@@ -342,9 +349,8 @@ pub fn setup_webview() {
     let webview = builder.build(&window).expect("Failed to build WebView");
 
     eprintln!(
-        "{APP_NAME} started — profile: {} — wry {} — {START_URL}",
+        "{APP_NAME} v{APP_VERSION} started — profile: {} — {START_URL}",
         data_dir.display(),
-        env!("CARGO_PKG_VERSION"),
     );
 
     event_loop.run(move |event, _, control_flow| {
