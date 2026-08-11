@@ -78,11 +78,12 @@ cargo clean
 ## Features
 
 - Loads https://grok.com in a native window (no address bar)
-- Window title shows package version (e.g. `Grok · v0.3.3`)
+- Window title shows package version (e.g. `Grok · v0.3.4`)
 - Persistent profile under LocalAppData
 - Page title synced to the window title
 - Clipboard and zoom hotkeys enabled
-- Downloads go to your Downloads folder (unique names; works with Imagine CDN URLs)
+- Downloads go to your Downloads folder (Imagine CDN / blob / `window.open` save support)
+- Download activity logged to `%LOCALAPPDATA%\GrokBrowser\logs\download.log`
 - `window.open` / target=_blank open in the same window
 - Host init script adds `name` on anonymous form fields (quieter autofill audits)
 - DevTools enabled in debug builds

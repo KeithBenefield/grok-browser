@@ -17,6 +17,7 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Host-injected (not page-eval) helpers:
 /// - Ensure form controls have a `name` so Chromium's autofill audit is quieter
+/// - `window.__grokSaveUrl` for Imagine / CDN assets opened via window.open
 /// - Never uses eval / string timers (avoids CSP `unsafe-eval` issues from *our* code)
 const PAGE_HELPERS_JS: &str = r#"
 (function () {
@@ -36,6 +37,45 @@ const PAGE_HELPERS_JS: &str = r#"
       }
     } catch (_) {}
   }
+
+  // Save a remote/blob URL as a file download (triggers WebView2 DownloadStarting).
+  // Imagine often uses window.open(cdnUrl) which our host maps here instead of navigating away.
+  window.__grokSaveUrl = function (url, filename) {
+    filename = filename || "grok-imagine.png";
+    function clickDownload(href, name) {
+      var a = document.createElement("a");
+      a.href = href;
+      a.download = name;
+      a.rel = "noopener";
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    // blob: / data: — direct download attribute works.
+    if (/^(blob:|data:)/i.test(url)) {
+      clickDownload(url, filename);
+      return Promise.resolve(true);
+    }
+    // Signed CDN URLs usually allow CORS GET without cookies (auth in query string).
+    return fetch(url, { credentials: "omit", mode: "cors", cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.blob();
+      })
+      .then(function (blob) {
+        var objectUrl = URL.createObjectURL(blob);
+        clickDownload(objectUrl, filename);
+        setTimeout(function () { URL.revokeObjectURL(objectUrl); }, 60000);
+        return true;
+      })
+      .catch(function () {
+        // Last resort: download attribute on cross-origin (browser may still download
+        // when Content-Disposition is attachment; otherwise may navigate — host avoids that).
+        clickDownload(url, filename);
+        return false;
+      });
+  };
 
   function run() {
     ensureFieldNames(document);
@@ -57,8 +97,16 @@ const PAGE_HELPERS_JS: &str = r#"
 
 enum UserEvent {
     TitleChanged(String),
-    /// `window.open` / target=_blank → load in this window instead of a popup.
+    /// `window.open` / target=_blank for normal pages → load in this window.
     Navigate(String),
+    /// Media / blob / Imagine asset → save via in-page download helper (don't navigate).
+    SaveUrl(String),
+    /// Notify UI after WebView2 finishes a download.
+    DownloadFinished {
+        url: String,
+        path: Option<PathBuf>,
+        success: bool,
+    },
 }
 
 /// WebView2 profile outside the build tree so `target/` does not accumulate cache.
@@ -186,6 +234,15 @@ fn unique_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
     dir.join(file_name)
 }
 
+fn generated_download_name(url: &str) -> String {
+    let ext = guess_extension_from_url(url).unwrap_or("png");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("grok-imagine-{ts}.{ext}")
+}
+
 /// Resolve a safe absolute download path under Downloads.
 /// Prefer WebView2's suggested file name (Content-Disposition), then URL, then a generated name.
 fn resolve_download_path(url: &str, suggested: &std::path::Path) -> PathBuf {
@@ -202,29 +259,103 @@ fn resolve_download_path(url: &str, suggested: &std::path::Path) -> PathBuf {
                 && !n.eq_ignore_ascii_case("untitled.bin")
         });
 
-    let name = from_webview
+    let mut name = from_webview
         .or_else(|| filename_from_url(url))
-        .unwrap_or_else(|| {
-            let ext = guess_extension_from_url(url).unwrap_or("bin");
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("grok-imagine-{ts}.{ext}")
-        });
+        .unwrap_or_else(|| generated_download_name(url));
 
     // If we still have no extension but the URL hints at one, append it.
-    let name = if std::path::Path::new(&name).extension().is_none() {
-        if let Some(ext) = guess_extension_from_url(url) {
-            format!("{name}.{ext}")
-        } else {
-            name
-        }
-    } else {
-        name
-    };
+    if std::path::Path::new(&name).extension().is_none() {
+        let ext = guess_extension_from_url(url).unwrap_or("png");
+        name = format!("{name}.{ext}");
+    }
 
     unique_path(&dir, &name)
+}
+
+/// URLs that should be saved as files, not opened as a full page navigation.
+/// Imagine's download control often does window.open(cdnUrl) / target=_blank.
+fn should_save_instead_of_navigate(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    if u.starts_with("blob:") || u.starts_with("data:image") || u.starts_with("data:video") {
+        return true;
+    }
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return false;
+    }
+
+    // Keep first-party app pages as navigations (chat, imagine UI, auth).
+    let is_app_page = (u.contains("grok.com/") || u.contains("://grok.com"))
+        && !u.contains("blob.core.windows.net");
+    let is_auth = u.contains("accounts.x.ai") || u.contains("/auth");
+    if is_app_page || is_auth {
+        return false;
+    }
+
+    // CDN / binary asset hosts and explicit media types in the URL.
+    if u.contains("blob.core.windows.net")
+        || u.contains("media.x.ai")
+        || u.contains("assets.x.ai")
+        || u.contains("cdn.")
+        || u.contains("format=png")
+        || u.contains("format=jpeg")
+        || u.contains("format=webp")
+        || u.contains("mime=image")
+    {
+        return true;
+    }
+
+    // Path ends with a media extension (ignore query string).
+    guess_extension_from_url(url).is_some()
+}
+
+fn js_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn app_log_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("GrokBrowser").join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn log_download(msg: &str) {
+    eprintln!("{msg}");
+    let path = app_log_dir().join("download.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
+fn reveal_in_explorer(path: &std::path::Path) {
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
 }
 
 fn default_window_title() -> String {
@@ -308,6 +439,7 @@ pub fn setup_webview() {
 
     let title_proxy = proxy.clone();
     let nav_proxy = proxy.clone();
+    let finished_proxy = proxy.clone();
 
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url(START_URL)
@@ -323,24 +455,34 @@ pub fn setup_webview() {
             // WebView2 may already suggest a path (Content-Disposition). Prefer that
             // name; never use raw CDN path segments alone (Imagine often has no ext).
             let dest = resolve_download_path(&url, path);
-            eprintln!("download started:\n  url:  {url}\n  file: {}", dest.display());
+            log_download(&format!(
+                "download started url={url} suggested={} dest={}",
+                path.display(),
+                dest.display()
+            ));
             *path = dest;
             true
         })
-        .with_download_completed_handler(|url, path, success| {
-            if success {
-                if let Some(path) = path {
-                    eprintln!("download complete: {}", path.display());
-                } else {
-                    eprintln!("download complete (no path): {url}");
-                }
-            } else {
-                eprintln!("download failed: {url}");
-            }
+        .with_download_completed_handler(move |url, path, success| {
+            log_download(&format!(
+                "download finished success={success} url={url} path={:?}",
+                path.as_ref().map(|p| p.display().to_string())
+            ));
+            let _ = finished_proxy.send_event(UserEvent::DownloadFinished {
+                url,
+                path,
+                success,
+            });
         })
-        // No second window: open links / window.open in this shell.
+        // No real second window. Auth links navigate in-place; media/Imagine assets save.
         .with_new_window_req_handler(move |url, _features| {
-            let _ = nav_proxy.send_event(UserEvent::Navigate(url));
+            if should_save_instead_of_navigate(&url) {
+                log_download(&format!("new-window -> save url={url}"));
+                let _ = nav_proxy.send_event(UserEvent::SaveUrl(url));
+            } else {
+                log_download(&format!("new-window -> navigate url={url}"));
+                let _ = nav_proxy.send_event(UserEvent::Navigate(url));
+            }
             NewWindowResponse::Deny
         })
         // DevTools in debug builds (right-click Inspect / F12 with accelerator keys).
@@ -348,10 +490,10 @@ pub fn setup_webview() {
 
     let webview = builder.build(&window).expect("Failed to build WebView");
 
-    eprintln!(
-        "{APP_NAME} v{APP_VERSION} started — profile: {} — {START_URL}",
-        data_dir.display(),
-    );
+    log_download(&format!(
+        "{APP_NAME} v{APP_VERSION} started profile={} url={START_URL}",
+        data_dir.display()
+    ));
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -364,7 +506,40 @@ pub fn setup_webview() {
             }
             Event::UserEvent(UserEvent::Navigate(url)) => {
                 if let Err(err) = webview.load_url(&url) {
-                    eprintln!("navigation failed ({url}): {err}");
+                    log_download(&format!("navigation failed url={url} err={err}"));
+                }
+            }
+            Event::UserEvent(UserEvent::SaveUrl(url)) => {
+                let name = generated_download_name(&url);
+                let script = format!(
+                    "window.__grokSaveUrl && window.__grokSaveUrl({}, {});",
+                    js_string_literal(&url),
+                    js_string_literal(&name)
+                );
+                log_download(&format!("invoking __grokSaveUrl name={name} url={url}"));
+                if let Err(err) = webview.evaluate_script(&script) {
+                    log_download(&format!("__grokSaveUrl script failed: {err}"));
+                }
+            }
+            Event::UserEvent(UserEvent::DownloadFinished {
+                url: _,
+                path,
+                success,
+            }) => {
+                if success {
+                    if let Some(ref path) = path {
+                        // Select the file in Explorer so the silent save is obvious.
+                        reveal_in_explorer(path);
+                        let note = format!(
+                            "console.log('[Grok] Saved download to {}');",
+                            path.display().to_string().replace('\\', "\\\\")
+                        );
+                        let _ = webview.evaluate_script(&note);
+                    }
+                } else {
+                    let _ = webview.evaluate_script(
+                        "console.warn('[Grok] Download failed — see %LOCALAPPDATA%\\\\GrokBrowser\\\\logs\\\\download.log');",
+                    );
                 }
             }
             Event::WindowEvent {
