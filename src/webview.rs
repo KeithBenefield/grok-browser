@@ -144,28 +144,24 @@ fn sanitize_filename(name: &str) -> String {
     let cleaned = cleaned.trim().trim_end_matches('.');
     if cleaned.is_empty() {
         "download".into()
-    } else {
-        // Keep names reasonable for Explorer / long CDN blobs.
-        if cleaned.len() > 180 {
-            let ext = std::path::Path::new(cleaned)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let stem: String = cleaned.chars().take(160).collect();
-            if ext.is_empty() {
-                stem
-            } else {
-                format!("{stem}.{ext}")
-            }
+    } else if cleaned.len() > 180 {
+        let ext = std::path::Path::new(cleaned)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let stem: String = cleaned.chars().take(160).collect();
+        if ext.is_empty() {
+            stem
         } else {
-            cleaned.to_string()
+            format!("{stem}.{ext}")
         }
+    } else {
+        cleaned.to_string()
     }
 }
 
 fn guess_extension_from_url(url: &str) -> Option<&'static str> {
     let lower = url.to_ascii_lowercase();
-    // Path or query often includes type for CDN / Imagine assets.
     const PAIRS: &[(&str, &str)] = &[
         (".png", "png"),
         (".jpg", "jpg"),
@@ -177,7 +173,6 @@ fn guess_extension_from_url(url: &str) -> Option<&'static str> {
         (".mov", "mov"),
         (".svg", "svg"),
         (".pdf", "pdf"),
-        (".zip", "zip"),
         ("image/png", "png"),
         ("image/jpeg", "jpg"),
         ("image/webp", "webp"),
@@ -198,40 +193,13 @@ fn filename_from_url(url: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    // Basic percent-decoding for spaces / common sequences.
     let decoded = raw.replace("%20", " ").replace("%2f", "_").replace("%2F", "_");
     let name = sanitize_filename(&decoded);
-    // Only trust URL segment if it looks like a real file name with extension.
     if std::path::Path::new(&name).extension().is_some() {
         Some(name)
     } else {
         None
     }
-}
-
-fn unique_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
-    let candidate = dir.join(file_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let path = std::path::Path::new(file_name);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("download");
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    for i in 1..10_000 {
-        let name = if ext.is_empty() {
-            format!("{stem} ({i})")
-        } else {
-            format!("{stem} ({i}).{ext}")
-        };
-        let p = dir.join(name);
-        if !p.exists() {
-            return p;
-        }
-    }
-    dir.join(file_name)
 }
 
 fn generated_download_name(url: &str) -> String {
@@ -243,12 +211,9 @@ fn generated_download_name(url: &str) -> String {
     format!("grok-imagine-{ts}.{ext}")
 }
 
-/// Resolve a safe absolute download path under Downloads.
-/// Prefer WebView2's suggested file name (Content-Disposition), then URL, then a generated name.
-fn resolve_download_path(url: &str, suggested: &std::path::Path) -> PathBuf {
-    let dir = downloads_dir();
-
-    let from_webview = suggested
+/// Suggested file name only (for the OS Save dialog).
+fn suggested_filename(url: &str, webview_path: &std::path::Path) -> String {
+    let from_webview = webview_path
         .file_name()
         .and_then(|n| n.to_str())
         .map(sanitize_filename)
@@ -263,13 +228,26 @@ fn resolve_download_path(url: &str, suggested: &std::path::Path) -> PathBuf {
         .or_else(|| filename_from_url(url))
         .unwrap_or_else(|| generated_download_name(url));
 
-    // If we still have no extension but the URL hints at one, append it.
     if std::path::Path::new(&name).extension().is_none() {
         let ext = guess_extension_from_url(url).unwrap_or("png");
         name = format!("{name}.{ext}");
     }
+    name
+}
 
-    unique_path(&dir, &name)
+/// Native Windows/macOS/Linux "Save As" dialog — let the OS pick the path.
+fn os_save_as_dialog(suggested_name: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Save file")
+        .set_file_name(suggested_name)
+        .set_directory(downloads_dir())
+        .add_filter("PNG image", &["png"])
+        .add_filter("JPEG image", &["jpg", "jpeg"])
+        .add_filter("WebP image", &["webp"])
+        .add_filter("GIF image", &["gif"])
+        .add_filter("Video", &["mp4", "webm", "mov"])
+        .add_filter("All files", &["*"])
+        .save_file()
 }
 
 /// URLs that should be saved as files, not opened as a full page navigation.
@@ -352,10 +330,34 @@ fn log_download(msg: &str) {
     }
 }
 
-fn reveal_in_explorer(path: &std::path::Path) {
-    let _ = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
-        .spawn();
+/// Download http(s) URL to an exact path the user chose in the OS Save dialog.
+fn http_download_to(url: &str, dest: &std::path::Path) -> Result<u64, String> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+    }
+
+    let response = ureq::get(url)
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GrokBrowser/0.3",
+        )
+        .set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+        .call()
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP {status}"));
+    }
+
+    let mut reader = response.into_reader();
+    let mut file = std::fs::File::create(dest).map_err(|e| format!("create file: {e}"))?;
+    let bytes = std::io::copy(&mut reader, &mut file).map_err(|e| format!("write file: {e}"))?;
+    if bytes == 0 {
+        let _ = std::fs::remove_file(dest);
+        return Err("empty response body".into());
+    }
+    Ok(bytes)
 }
 
 fn default_window_title() -> String {
@@ -440,6 +442,7 @@ pub fn setup_webview() {
     let title_proxy = proxy.clone();
     let nav_proxy = proxy.clone();
     let finished_proxy = proxy.clone();
+    let save_proxy = proxy.clone();
 
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url(START_URL)
@@ -452,16 +455,23 @@ pub fn setup_webview() {
             let _ = title_proxy.send_event(UserEvent::TitleChanged(title));
         })
         .with_download_started_handler(move |url, path| {
-            // WebView2 may already suggest a path (Content-Disposition). Prefer that
-            // name; never use raw CDN path segments alone (Imagine often has no ext).
-            let dest = resolve_download_path(&url, path);
+            // Ask the OS where to save (native Save As), then let WebView2 write the file.
+            let name = suggested_filename(&url, path);
             log_download(&format!(
-                "download started url={url} suggested={} dest={}",
-                path.display(),
-                dest.display()
+                "download started url={url} suggested_name={name} webview_path={}",
+                path.display()
             ));
-            *path = dest;
-            true
+            match os_save_as_dialog(&name) {
+                Some(dest) => {
+                    log_download(&format!("user chose save path {}", dest.display()));
+                    *path = dest;
+                    true
+                }
+                None => {
+                    log_download("user cancelled Save As dialog");
+                    false
+                }
+            }
         })
         .with_download_completed_handler(move |url, path, success| {
             log_download(&format!(
@@ -510,35 +520,74 @@ pub fn setup_webview() {
                 }
             }
             Event::UserEvent(UserEvent::SaveUrl(url)) => {
-                let name = generated_download_name(&url);
-                let script = format!(
-                    "window.__grokSaveUrl && window.__grokSaveUrl({}, {});",
-                    js_string_literal(&url),
-                    js_string_literal(&name)
-                );
-                log_download(&format!("invoking __grokSaveUrl name={name} url={url}"));
-                if let Err(err) = webview.evaluate_script(&script) {
-                    log_download(&format!("__grokSaveUrl script failed: {err}"));
+                // blob:/data: must stay in the page (host can't fetch them).
+                if url.starts_with("blob:") || url.starts_with("data:") {
+                    let name = generated_download_name(&url);
+                    let script = format!(
+                        "window.__grokSaveUrl && window.__grokSaveUrl({}, {});",
+                        js_string_literal(&url),
+                        js_string_literal(&name)
+                    );
+                    log_download(&format!("blob/data save via page helper name={name}"));
+                    if let Err(err) = webview.evaluate_script(&script) {
+                        log_download(&format!("__grokSaveUrl script failed: {err}"));
+                    }
+                } else {
+                    // OS Save As, then download the bytes ourselves (signed CDN URLs).
+                    let name = generated_download_name(&url);
+                    if let Some(dest) = os_save_as_dialog(&name) {
+                        log_download(&format!(
+                            "host download after Save As dest={} url={url}",
+                            dest.display()
+                        ));
+                        let done = save_proxy.clone();
+                        std::thread::spawn(move || {
+                            let result = http_download_to(&url, &dest);
+                            match result {
+                                Ok(bytes) => {
+                                    log_download(&format!(
+                                        "host download ok bytes={bytes} dest={}",
+                                        dest.display()
+                                    ));
+                                    let _ = done.send_event(UserEvent::DownloadFinished {
+                                        url,
+                                        path: Some(dest),
+                                        success: true,
+                                    });
+                                }
+                                Err(err) => {
+                                    log_download(&format!("host download failed: {err}"));
+                                    let _ = done.send_event(UserEvent::DownloadFinished {
+                                        url,
+                                        path: None,
+                                        success: false,
+                                    });
+                                }
+                            }
+                        });
+                    } else {
+                        log_download("user cancelled Save As (host download path)");
+                    }
                 }
             }
             Event::UserEvent(UserEvent::DownloadFinished {
-                url: _,
+                url,
                 path,
                 success,
             }) => {
                 if success {
                     if let Some(ref path) = path {
-                        // Select the file in Explorer so the silent save is obvious.
-                        reveal_in_explorer(path);
+                        log_download(&format!("saved ok {}", path.display()));
                         let note = format!(
-                            "console.log('[Grok] Saved download to {}');",
+                            "console.log('[Grok] Saved to {}');",
                             path.display().to_string().replace('\\', "\\\\")
                         );
                         let _ = webview.evaluate_script(&note);
                     }
                 } else {
+                    log_download(&format!("save failed url={url}"));
                     let _ = webview.evaluate_script(
-                        "console.warn('[Grok] Download failed — see %LOCALAPPDATA%\\\\GrokBrowser\\\\logs\\\\download.log');",
+                        "console.warn('[Grok] Save failed — see %LOCALAPPDATA%\\\\GrokBrowser\\\\logs\\\\download.log');",
                     );
                 }
             }

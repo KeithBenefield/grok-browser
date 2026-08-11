@@ -82,7 +82,8 @@ cargo clean
 - Persistent profile under LocalAppData
 - Page title synced to the window title
 - Clipboard and zoom hotkeys enabled
-- Downloads go to your Downloads folder (Imagine CDN / blob / `window.open` save support)
+- Downloads use the **OS Save As dialog** (you pick the folder/name; Windows writes the file)
+- Imagine CDN / blob / `window.open` save support
 - Download activity logged to `%LOCALAPPDATA%\GrokBrowser\logs\download.log`
 - `window.open` / target=_blank open in the same window
 - Host init script adds `name` on anonymous form fields (quieter autofill audits)
