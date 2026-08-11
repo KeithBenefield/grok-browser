@@ -81,7 +81,7 @@ cargo clean
 - Persistent profile under LocalAppData
 - Page title synced to the window title
 - Clipboard and zoom hotkeys enabled
-- Downloads default to your Downloads folder
+- Downloads go to your Downloads folder (unique names; works with Imagine CDN URLs)
 - `window.open` / target=_blank open in the same window
 - Host init script adds `name` on anonymous form fields (quieter autofill audits)
 - DevTools enabled in debug builds

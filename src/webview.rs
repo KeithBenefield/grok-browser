@@ -75,10 +75,155 @@ fn user_data_dir() -> PathBuf {
 }
 
 fn downloads_dir() -> PathBuf {
-    std::env::var_os("USERPROFILE")
+    let dir = std::env::var_os("USERPROFILE")
         .map(|p| PathBuf::from(p).join("Downloads"))
-        .filter(|p| p.is_dir())
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Strip characters Windows rejects in file names.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_end_matches('.');
+    if cleaned.is_empty() {
+        "download".into()
+    } else {
+        // Keep names reasonable for Explorer / long CDN blobs.
+        if cleaned.len() > 180 {
+            let ext = std::path::Path::new(cleaned)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let stem: String = cleaned.chars().take(160).collect();
+            if ext.is_empty() {
+                stem
+            } else {
+                format!("{stem}.{ext}")
+            }
+        } else {
+            cleaned.to_string()
+        }
+    }
+}
+
+fn guess_extension_from_url(url: &str) -> Option<&'static str> {
+    let lower = url.to_ascii_lowercase();
+    // Path or query often includes type for CDN / Imagine assets.
+    const PAIRS: &[(&str, &str)] = &[
+        (".png", "png"),
+        (".jpg", "jpg"),
+        (".jpeg", "jpeg"),
+        (".webp", "webp"),
+        (".gif", "gif"),
+        (".mp4", "mp4"),
+        (".webm", "webm"),
+        (".mov", "mov"),
+        (".svg", "svg"),
+        (".pdf", "pdf"),
+        (".zip", "zip"),
+        ("image/png", "png"),
+        ("image/jpeg", "jpg"),
+        ("image/webp", "webp"),
+        ("image/gif", "gif"),
+        ("video/mp4", "mp4"),
+    ];
+    for (needle, ext) in PAIRS {
+        if lower.contains(needle) {
+            return Some(ext);
+        }
+    }
+    None
+}
+
+fn filename_from_url(url: &str) -> Option<String> {
+    let path_part = url.split(['?', '#']).next().unwrap_or(url);
+    let raw = path_part.rsplit('/').next().unwrap_or("");
+    if raw.is_empty() {
+        return None;
+    }
+    // Basic percent-decoding for spaces / common sequences.
+    let decoded = raw.replace("%20", " ").replace("%2f", "_").replace("%2F", "_");
+    let name = sanitize_filename(&decoded);
+    // Only trust URL segment if it looks like a real file name with extension.
+    if std::path::Path::new(&name).extension().is_some() {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn unique_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
+    let candidate = dir.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let path = std::path::Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    for i in 1..10_000 {
+        let name = if ext.is_empty() {
+            format!("{stem} ({i})")
+        } else {
+            format!("{stem} ({i}).{ext}")
+        };
+        let p = dir.join(name);
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(file_name)
+}
+
+/// Resolve a safe absolute download path under Downloads.
+/// Prefer WebView2's suggested file name (Content-Disposition), then URL, then a generated name.
+fn resolve_download_path(url: &str, suggested: &std::path::Path) -> PathBuf {
+    let dir = downloads_dir();
+
+    let from_webview = suggested
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(sanitize_filename)
+        .filter(|n| {
+            !n.is_empty()
+                && !n.eq_ignore_ascii_case("download")
+                && !n.eq_ignore_ascii_case("untitled")
+                && !n.eq_ignore_ascii_case("untitled.bin")
+        });
+
+    let name = from_webview
+        .or_else(|| filename_from_url(url))
+        .unwrap_or_else(|| {
+            let ext = guess_extension_from_url(url).unwrap_or("bin");
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("grok-imagine-{ts}.{ext}")
+        });
+
+    // If we still have no extension but the URL hints at one, append it.
+    let name = if std::path::Path::new(&name).extension().is_none() {
+        if let Some(ext) = guess_extension_from_url(url) {
+            format!("{name}.{ext}")
+        } else {
+            name
+        }
+    } else {
+        name
+    };
+
+    unique_path(&dir, &name)
 }
 
 fn set_window_title(window: &tao::window::Window, title: &str) {
@@ -168,28 +313,22 @@ pub fn setup_webview() {
             let _ = title_proxy.send_event(UserEvent::TitleChanged(title));
         })
         .with_download_started_handler(move |url, path| {
-            let name = url
-                .rsplit('/')
-                .next()
-                .and_then(|s| {
-                    let clean = s.split('?').next().unwrap_or(s);
-                    if !clean.is_empty() && clean.contains('.') {
-                        Some(clean)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or("download");
-            *path = downloads_dir().join(name);
+            // WebView2 may already suggest a path (Content-Disposition). Prefer that
+            // name; never use raw CDN path segments alone (Imagine often has no ext).
+            let dest = resolve_download_path(&url, path);
+            eprintln!("download started:\n  url:  {url}\n  file: {}", dest.display());
+            *path = dest;
             true
         })
-        .with_download_completed_handler(|_url, path, success| {
+        .with_download_completed_handler(|url, path, success| {
             if success {
                 if let Some(path) = path {
                     eprintln!("download complete: {}", path.display());
+                } else {
+                    eprintln!("download complete (no path): {url}");
                 }
             } else {
-                eprintln!("download failed");
+                eprintln!("download failed: {url}");
             }
         })
         // No second window: open links / window.open in this shell.
